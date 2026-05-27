@@ -128,9 +128,9 @@ export default function SettingsModal({ open, masterKey, salt, onClose, onOpenSy
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 p-3 sm:p-6 flex items-end sm:items-center justify-center overflow-y-auto">
-      <div className="w-full max-w-3xl rounded-3xl bg-white shadow-2xl border overflow-hidden max-h-[92vh] overflow-y-auto">
-        <div className="flex items-center justify-between px-5 py-4 border-b bg-gray-50">
+    <div className="fixed inset-0 z-50 bg-black/50 p-0 sm:p-6 flex items-end sm:items-center justify-center overflow-y-auto">
+      <div className="w-full h-[100dvh] sm:h-auto max-w-3xl rounded-none sm:rounded-3xl bg-white shadow-2xl border overflow-hidden max-h-[100dvh] sm:max-h-[92vh] overflow-y-auto">
+        <div className="sticky top-0 z-10 flex items-center justify-between px-4 sm:px-5 py-4 border-b bg-gray-50/95 backdrop-blur">
           <div>
             <h3 className="text-lg font-semibold text-gray-900">Configuración</h3>
             <p className="text-sm text-gray-600">Exporta, importa, sincroniza o borra la sesión.</p>
@@ -138,7 +138,7 @@ export default function SettingsModal({ open, masterKey, salt, onClose, onOpenSy
           <button className="rounded-full border px-3 py-2 text-sm" onClick={onClose}>Cerrar</button>
         </div>
 
-        <div className="grid gap-4 p-5 sm:grid-cols-2">
+        <div className="grid gap-4 p-4 sm:p-5 sm:grid-cols-2">
           <section className="rounded-2xl border bg-white p-4 space-y-3">
             <h4 className="font-semibold text-gray-900">Backup cifrado</h4>
             <p className="text-sm text-gray-600">Descarga toda la sesión en un archivo cifrado. Solo podrás importarlo con la contraseña original del backup.</p>
@@ -210,7 +210,7 @@ export default function SettingsModal({ open, masterKey, salt, onClose, onOpenSy
           </section>
         </div>
 
-        {message && <div className="px-5 pb-5 text-sm text-gray-700">{message}</div>}
+        {message && <div className="px-4 sm:px-5 pb-5 text-sm text-gray-700">{message}</div>}
       </div>
     </div>
   )

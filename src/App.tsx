@@ -42,19 +42,19 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="sticky top-0 z-20 border-b bg-white/90 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3 sm:px-6 lg:px-8">
+        <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
           <div>
             <h1 className="text-lg font-semibold text-gray-900">CLS Notes</h1>
             <p className="text-xs text-gray-500">Privacidad local, notas cifradas y sync P2P</p>
           </div>
-          <div className="flex flex-wrap justify-end gap-2">
-            <button className="rounded-xl border px-3 py-2 text-sm font-medium bg-white" onClick={() => setSettingsOpen(true)}>Configuración</button>
-            <button className="rounded-xl bg-gray-900 px-3 py-2 text-sm font-medium text-white" onClick={()=>setSyncOpen(true)}>Sincronizar</button>
+          <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
+            <button className="w-full rounded-xl border px-3 py-2 text-sm font-medium bg-white sm:w-auto" onClick={() => setSettingsOpen(true)}>Configuración</button>
+            <button className="w-full rounded-xl bg-gray-900 px-3 py-2 text-sm font-medium text-white sm:w-auto" onClick={()=>setSyncOpen(true)}>Sincronizar</button>
           </div>
         </div>
       </header>
       <NotesView masterKey={masterKey} salt={salt} />
-      <div className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-4 sm:bottom-4 bg-white border rounded-2xl shadow-lg px-4 py-3 text-sm text-gray-700 max-w-none sm:max-w-xs">
+      <div className="fixed bottom-3 left-3 right-3 sm:left-auto sm:right-4 sm:bottom-4 bg-white border rounded-2xl shadow-lg px-4 py-3 text-sm text-gray-700 max-w-none sm:max-w-xs">
         <div className="font-medium text-gray-900">Almacenamiento</div>
         <div>{formatBytes(quota.usage)} usados de {formatBytes(quota.quota)}</div>
         <div>{Math.round(quota.usageRatio * 100)}% en uso</div>

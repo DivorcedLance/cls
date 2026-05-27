@@ -43,12 +43,12 @@ export default function NotesView({ masterKey }: { masterKey: CryptoKey }) {
   }
 
   return (
-    <div className="min-h-screen px-4 py-6 sm:px-6 lg:px-8 bg-gradient-to-b from-gray-50 to-white">
+    <div className="min-h-screen px-3 py-4 sm:px-6 lg:px-8 bg-gradient-to-b from-gray-50 to-white">
       <div className="max-w-6xl mx-auto space-y-6">
         <div className="rounded-3xl border bg-white shadow-sm p-4 sm:p-6">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between mb-5">
             <div>
-              <h2 className="text-3xl font-semibold text-gray-900">Tus notas</h2>
+              <h2 className="text-2xl sm:text-3xl font-semibold text-gray-900">Tus notas</h2>
               <p className="text-sm text-gray-600 mt-1">Texto enriquecido en Markdown e imágenes cifradas localmente.</p>
             </div>
             <div className="text-sm text-gray-500">{notes.length} nota{notes.length === 1 ? '' : 's'}</div>
@@ -68,8 +68,8 @@ export default function NotesView({ masterKey }: { masterKey: CryptoKey }) {
               className="w-full rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 outline-none focus:border-blue-500 focus:bg-white h-32"
             />
 
-            <div className="flex flex-wrap items-center gap-3">
-              <label className="inline-flex items-center gap-2 rounded-xl border border-dashed border-gray-300 px-4 py-3 bg-white text-sm text-gray-700 cursor-pointer hover:border-blue-400 hover:text-blue-700 transition">
+            <div className="grid gap-3 sm:flex sm:flex-wrap sm:items-center">
+              <label className="inline-flex w-full sm:w-auto items-center justify-center gap-2 rounded-xl border border-dashed border-gray-300 px-4 py-3 bg-white text-sm text-gray-700 cursor-pointer hover:border-blue-400 hover:text-blue-700 transition">
                 <input
                   type="file"
                   className="hidden"
@@ -83,7 +83,7 @@ export default function NotesView({ masterKey }: { masterKey: CryptoKey }) {
                 />
                 <span>Agregar imagen</span>
               </label>
-              <button className="px-5 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition shadow-sm">
+              <button className="w-full sm:w-auto px-5 py-3 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 transition shadow-sm">
                 Guardar nota
               </button>
             </div>
@@ -101,7 +101,7 @@ export default function NotesView({ masterKey }: { masterKey: CryptoKey }) {
           </form>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid gap-4 md:grid-cols-2">
           {notes.length === 0 ? (
             <div className="rounded-3xl border border-dashed bg-white p-8 text-center text-gray-500 lg:col-span-2">
               Aún no hay notas. Crea la primera arriba.
@@ -171,10 +171,10 @@ function NoteItem({ note, masterKey }: { note: NoteEntry; masterKey: CryptoKey }
   }
 
   return (
-    <article className="rounded-3xl border bg-white shadow-sm p-4 sm:p-5 flex flex-col gap-4">
+    <article className="rounded-3xl border bg-white shadow-sm p-4 sm:p-5 flex flex-col gap-4 min-w-0">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="font-semibold text-lg text-gray-900">{note.title || 'Sin título'}</h3>
+          <h3 className="font-semibold text-lg text-gray-900 break-words">{note.title || 'Sin título'}</h3>
           <p className="text-xs text-gray-500 mt-1">Actualizada {new Date(note.updatedAt).toLocaleString()}</p>
         </div>
         <button
@@ -184,11 +184,11 @@ function NoteItem({ note, masterKey }: { note: NoteEntry; masterKey: CryptoKey }
           Borrar
         </button>
       </div>
-      <div className="prose prose-sm max-w-none text-gray-800 whitespace-pre-wrap">{text}</div>
+      <div className="prose prose-sm max-w-none text-gray-800 whitespace-pre-wrap break-words">{text}</div>
       {images.length > 0 && (
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
           {images.map((src) => (
-            <img key={src} src={src} className="w-full rounded-2xl border object-cover max-h-56" />
+            <img key={src} src={src} className="w-full rounded-2xl border object-cover max-h-52 sm:max-h-56" />
           ))}
         </div>
       )}
@@ -223,12 +223,12 @@ function SelectedImageChip({ imageId, masterKey, onRemove }: { imageId: string; 
   }, [imageId, masterKey])
 
   return (
-    <div className="relative w-24 h-24 rounded-2xl overflow-hidden border bg-white group">
+    <div className="relative w-20 h-20 sm:w-24 sm:h-24 rounded-2xl overflow-hidden border bg-white group">
       {src ? <img src={src} alt="Adjunta" className="w-full h-full object-cover" /> : <div className="w-full h-full bg-gray-200" />}
       <button
         type="button"
         onClick={() => onRemove(imageId)}
-        className="absolute top-2 right-2 rounded-full bg-black/70 text-white w-7 h-7 text-sm opacity-90 group-hover:opacity-100"
+        className="absolute top-1.5 right-1.5 rounded-full bg-black/70 text-white w-7 h-7 text-sm opacity-90 group-hover:opacity-100"
         aria-label="Eliminar imagen"
       >
         ×

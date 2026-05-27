@@ -3,4 +3,5 @@
 @tailwind utilities;
 
 html, body, #root { height: 100%; }
-body { @apply bg-gray-50 text-gray-900; }
+html { overflow-x: hidden; }
+body { @apply bg-gray-50 text-gray-900 overflow-x-hidden; }
