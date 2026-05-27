@@ -2,13 +2,14 @@ import React, { useEffect, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import QrScanner from 'qr-scanner'
 import { createOfferAndCompress, setRemoteOfferAndCreateAnswer, setRemoteCompressedAnswer } from '../core/p2p'
-import { clearConnection, getConnection, saveConnection } from '../core/connectionStore'
+import { clearConnection, getConnection, getSavedConnections, removeConnection, saveConnection } from '../core/connectionStore'
 import { createSyncMessageHandler, sendSyncSnapshot } from '../core/sync'
 
 QrScanner.WORKER_PATH = new URL('qr-scanner/qr-scanner-worker.min.js', import.meta.url).toString()
 
 type SyncStage = 'idle' | 'hosting' | 'waiting-for-answer' | 'scanning' | 'responding' | 'connected' | 'error'
 type SyncAuthority = 'a' | 'b'
+type SyncTab = 'sync' | 'saved'
 
 const qrOptions = {
   errorCorrectionLevel: 'H' as const,
@@ -21,6 +22,7 @@ const qrOptions = {
 }
 
 export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey; onClose?: () => void }) {
+  const [tab, setTab] = useState<SyncTab>('sync')
   const [stage, setStage] = useState<SyncStage>('idle')
   const [instruction, setInstruction] = useState('Pulsa crear sincronización para mostrar el QR.')
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
@@ -37,6 +39,8 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
   const [hasSavedConnection, setHasSavedConnection] = useState(false)
   const [responseToken, setResponseToken] = useState('')
   const [pastedResponse, setPastedResponse] = useState('')
+  const [savedItems, setSavedItems] = useState(getSavedConnections())
+  const [activeConnectionId, setActiveConnectionId] = useState<string | null>(null)
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const dcRef = useRef<RTCDataChannel | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -64,6 +68,27 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
     attachChannel(saved.dc)
     setLogs((prev) => [...prev, 'Conexión restaurada desde memoria'])
   }, [])
+
+  function refreshSavedItems() {
+    setSavedItems([...getSavedConnections()])
+  }
+
+  function persistCurrentConnection(connectionName?: string) {
+    if (!keepConnectionRef.current || !pcRef.current || !dcRef.current || dcRef.current.readyState !== 'open') {
+      return
+    }
+
+    const saved = saveConnection({
+      id: activeConnectionId ?? undefined,
+      name: connectionName,
+      pc: pcRef.current,
+      dc: dcRef.current,
+    })
+
+    setActiveConnectionId(saved.id)
+    setHasSavedConnection(true)
+    refreshSavedItems()
+  }
 
   useEffect(() => {
     return () => {
@@ -147,8 +172,7 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
       }
 
       if (keepConnectionRef.current && pcRef.current) {
-        saveConnection({ pc: pcRef.current, dc: channel })
-        setHasSavedConnection(true)
+        persistCurrentConnection()
       }
     }
     channel.onclose = () => {
@@ -157,6 +181,8 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
       setLogs((prev) => [...prev, 'Canal cerrado'])
       clearConnection()
       setHasSavedConnection(false)
+      setActiveConnectionId(null)
+      refreshSavedItems()
     }
     channel.onmessage = createSyncMessageHandler(
       channel,
@@ -386,10 +412,7 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
   }
 
   function closeView() {
-    if (keepConnectionRef.current && pcRef.current && dcRef.current && dcRef.current.readyState === 'open') {
-      saveConnection({ pc: pcRef.current, dc: dcRef.current })
-      setHasSavedConnection(true)
-    }
+    persistCurrentConnection()
     onClose?.()
   }
 
@@ -409,6 +432,41 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
     setInstruction('La sesión guardada volvió a vincularse en esta ventana.')
     setHasSavedConnection(true)
     setLogs((prev) => [...prev, 'Sesión guardada reanudada manualmente'])
+  }
+
+  async function reconnectSavedItem(id: string) {
+    const saved = getConnection(id)
+    if (!saved) {
+      setStatus('Esa conexión ya no existe')
+      refreshSavedItems()
+      return
+    }
+
+    if (saved.dc.readyState !== 'open') {
+      setStatus('La conexión está cerrada')
+      setInstruction('Esa sesión ya no está activa. Solo se puede reconectar si sigue viva en esta pestaña.')
+      return
+    }
+
+    pcRef.current = saved.pc
+    dcRef.current = saved.dc
+    setActiveConnectionId(saved.id)
+    attachChannel(saved.dc)
+    setTab('sync')
+    setStage('connected')
+    setStatus(`Conexión reanudada: ${saved.name}`)
+    setInstruction('Se reabrió la sesión guardada. Ya puedes seguir sin repetir el QR.')
+    setHasSavedConnection(true)
+    setLogs((prev) => [...prev, `Sesión reanudada: ${saved.name}`])
+    refreshSavedItems()
+  }
+
+  function forgetSavedItem(id: string) {
+    removeConnection(id)
+    if (activeConnectionId === id) {
+      setActiveConnectionId(null)
+    }
+    refreshSavedItems()
   }
 
   async function applyPastedResponse() {
@@ -446,17 +504,21 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
               </div>
             )}
           </div>
-          <div className="flex gap-2">
-            <label className="flex items-center gap-2 px-3 py-2 rounded border text-sm bg-white">
-              <input
-                type="checkbox"
-                checked={keepConnection}
-                onChange={(event) => setKeepConnection(event.target.checked)}
-              />
-              Guardar conexión
-            </label>
-            <button className="px-3 py-2 rounded border" onClick={reconnectSavedConnection} disabled={busy || !hasSavedConnection}>
-              Reconectar guardada
+          <div className="flex flex-wrap gap-2 justify-end">
+            <button
+              className={`px-3 py-2 rounded border text-sm ${tab === 'sync' ? 'bg-slate-900 text-white' : 'bg-white'}`}
+              onClick={() => setTab('sync')}
+            >
+              Nueva conexión
+            </button>
+            <button
+              className={`px-3 py-2 rounded border text-sm ${tab === 'saved' ? 'bg-slate-900 text-white' : 'bg-white'}`}
+              onClick={() => {
+                refreshSavedItems()
+                setTab('saved')
+              }}
+            >
+              Conexiones guardadas ({savedItems.length})
             </button>
             <button className="px-3 py-2 rounded border" onClick={resetSession} disabled={busy}>
               Reiniciar
@@ -467,8 +529,9 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
           </div>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-          <div className="space-y-4">
+        {tab === 'sync' ? (
+          <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+            <div className="space-y-4">
             <div className="rounded-xl border p-4 bg-gray-50">
               <div className="flex flex-wrap items-center gap-3 mb-3">
                 <button
@@ -621,7 +684,6 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
                 </div>
               )}
             </div>
-
             <div className="rounded-xl border p-4">
               <h4 className="font-medium mb-2">Registro</h4>
               <div className="h-40 overflow-auto rounded bg-gray-50 p-3 text-sm text-gray-700 space-y-1">
@@ -661,6 +723,86 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
             )}
           </div>
         </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="rounded-xl border p-4 bg-slate-50">
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                <div>
+                  <h4 className="font-medium">Conexiones guardadas</h4>
+                  <p className="text-sm text-gray-600">Elige una sesión viva para reanudarla desde esta pestaña.</p>
+                </div>
+                <label className="flex items-center gap-2 px-3 py-2 rounded border text-sm bg-white">
+                  <input
+                    type="checkbox"
+                    checked={keepConnection}
+                    onChange={(event) => setKeepConnection(event.target.checked)}
+                  />
+                  Guardar conexión
+                </label>
+              </div>
+
+              {savedItems.length === 0 ? (
+                <div className="rounded-xl border border-dashed p-6 text-center text-gray-500 bg-white">
+                  No hay conexiones guardadas todavía.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {savedItems.map((item) => (
+                    <div key={item.id} className="rounded-xl border bg-white p-4 flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <div className="font-medium flex items-center gap-2">
+                          {item.name}
+                          {activeConnectionId === item.id && (
+                            <span className="text-xs rounded-full bg-emerald-100 text-emerald-800 px-2 py-0.5">Activa</span>
+                          )}
+                        </div>
+                        <p className="text-sm text-gray-600">Estado: {item.dc.readyState} · Guardada: {new Date(item.createdAt).toLocaleString()}</p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          className="px-3 py-2 rounded border bg-slate-900 text-white text-sm disabled:opacity-50"
+                          onClick={() => reconnectSavedItem(item.id)}
+                          disabled={busy}
+                        >
+                          Reconectar
+                        </button>
+                        <button
+                          className="px-3 py-2 rounded border text-sm"
+                          onClick={() => {
+                            setActiveConnectionId(item.id)
+                            setTab('sync')
+                            setStatus(`Seleccionaste ${item.name}`)
+                            setInstruction('Ahora vuelve a la pestaña principal para seguir con esa sesión.')
+                          }}
+                        >
+                          Ver
+                        </button>
+                        <button
+                          className="px-3 py-2 rounded border text-sm"
+                          onClick={() => forgetSavedItem(item.id)}
+                        >
+                          Quitar
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-xl border p-4 bg-white">
+              <h4 className="font-medium mb-2">Cómo reconectar</h4>
+              <ol className="text-sm text-gray-700 space-y-2 list-decimal list-inside">
+                <li>Abre la pestaña <span className="font-semibold">Conexiones guardadas</span>.</li>
+                <li>Busca la sesión viva que quieras usar otra vez.</li>
+                <li>Haz click en <span className="font-semibold">Reconectar</span>.</li>
+              </ol>
+              <p className="text-sm text-gray-600 mt-3">
+                Esto solo funciona si la sesión sigue viva en esta pestaña. Si recargas o cierras el navegador, WebRTC necesita un nuevo intercambio.
+              </p>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
