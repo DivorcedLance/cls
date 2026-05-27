@@ -8,7 +8,7 @@ type SettingsModalProps = {
   masterKey: CryptoKey
   salt: Uint8Array | null
   onClose: () => void
-  onOpenSync: () => void
+  onOpenSync: (mode: 'create' | 'sync') => void
   onLogout: () => void
 }
 
@@ -182,10 +182,15 @@ export default function SettingsModal({ open, masterKey, salt, onClose, onOpenSy
 
           <section className="rounded-2xl border bg-white p-4 space-y-3 sm:col-span-2">
             <h4 className="font-semibold text-gray-900">Sincronización</h4>
-            <p className="text-sm text-gray-600">Abre el módulo de sincronización entre dispositivos desde aquí.</p>
-            <button className="w-full rounded-xl bg-gray-900 px-4 py-3 text-white font-medium" onClick={onOpenSync}>
-              Abrir sincronización P2P
-            </button>
+            <p className="text-sm text-gray-600">Elige el flujo que quieras usar.</p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <button className="w-full rounded-xl bg-gray-900 px-4 py-3 text-white font-medium" onClick={() => onOpenSync('create')}>
+                Crear sincronización
+              </button>
+              <button className="w-full rounded-xl border px-4 py-3 font-medium bg-white" onClick={() => onOpenSync('sync')}>
+                Sincronizar
+              </button>
+            </div>
           </section>
 
           <section className="rounded-2xl border bg-white p-4 space-y-3 sm:col-span-2">

@@ -10,6 +10,7 @@ export default function App() {
   const [masterKey, setMasterKey] = useState<CryptoKey | null>(null)
   const [salt, setSalt] = useState<Uint8Array | null>(null)
   const [syncOpen, setSyncOpen] = useState(false)
+  const [syncMode, setSyncMode] = useState<'create' | 'sync'>('create')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const quota = useStorageQuota()
 
@@ -47,9 +48,8 @@ export default function App() {
             <h1 className="text-lg font-semibold text-gray-900">CLS Notes</h1>
             <p className="text-xs text-gray-500">Privacidad local, notas cifradas y sync P2P</p>
           </div>
-          <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
+          <div className="flex justify-end">
             <button className="w-full rounded-xl border px-3 py-2 text-sm font-medium bg-white sm:w-auto" onClick={() => setSettingsOpen(true)}>Configuración</button>
-            <button className="w-full rounded-xl bg-gray-900 px-3 py-2 text-sm font-medium text-white sm:w-auto" onClick={()=>setSyncOpen(true)}>Sincronizar</button>
           </div>
         </div>
       </header>
@@ -65,8 +65,9 @@ export default function App() {
           masterKey={masterKey}
           salt={salt}
           onClose={() => setSettingsOpen(false)}
-          onOpenSync={() => {
+          onOpenSync={(mode) => {
             setSettingsOpen(false)
+            setSyncMode(mode)
             setSyncOpen(true)
           }}
           onLogout={() => {
@@ -77,7 +78,7 @@ export default function App() {
           }}
         />
       )}
-      {syncOpen && masterKey && <SyncView masterKey={masterKey} onClose={()=>setSyncOpen(false)} />}
+      {syncOpen && masterKey && <SyncView masterKey={masterKey} onClose={()=>setSyncOpen(false)} initialMode={syncMode} />}
     </div>
   )
 }

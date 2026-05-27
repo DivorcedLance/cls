@@ -1,12 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react'
 import QRCode from 'qrcode'
 import QrScanner from 'qr-scanner'
+import { db } from '../core/db'
 import { createOfferAndCompress, setRemoteOfferAndCreateAnswer, setRemoteCompressedAnswer } from '../core/p2p'
 import { createSyncMessageHandler, sendSyncSnapshot } from '../core/sync'
 
 QrScanner.WORKER_PATH = new URL('qr-scanner/qr-scanner-worker.min.js', import.meta.url).toString()
 
-type SyncStage = 'idle' | 'hosting' | 'waiting-for-answer' | 'scanning' | 'responding' | 'connected' | 'error'
+type SyncMode = 'create' | 'sync'
+type SyncStep = 'qr' | 'code' | 'progress'
 type SyncAuthority = 'a' | 'b'
 
 const qrOptions = {
@@ -19,29 +21,50 @@ const qrOptions = {
   },
 }
 
-export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey; onClose?: () => void }) {
-  const [flowStep, setFlowStep] = useState<'qr' | 'code' | 'progress'>('qr')
-  const [stage, setStage] = useState<SyncStage>('idle')
-  const [instruction, setInstruction] = useState('Paso 1 de 3')
+const stepLabels: Array<{ id: SyncStep; label: string }> = [
+  { id: 'qr', label: 'QR' },
+  { id: 'code', label: 'Código' },
+  { id: 'progress', label: 'Progreso' },
+]
+
+type SnapshotSummary = {
+  notes: number
+  images: number
+  titles: string[]
+}
+
+export default function SyncView({
+  masterKey,
+  onClose,
+  initialMode = 'create',
+}: {
+  masterKey: CryptoKey
+  onClose?: () => void
+  initialMode?: SyncMode
+}) {
+  const [mode] = useState<SyncMode>(initialMode)
+  const [step, setStep] = useState<SyncStep>('qr')
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null)
-  const [status, setStatus] = useState('Listo')
-  const [logs, setLogs] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [sendProgress, setSendProgress] = useState({ current: 0, total: 0 })
   const [receiveProgress, setReceiveProgress] = useState({ current: 0, total: 0 })
-  const [chosenAuthority, setChosenAuthority] = useState<SyncAuthority | null>(null)
-  const [pendingOffer, setPendingOffer] = useState<string | null>(null)
-  const [syncResult, setSyncResult] = useState<'idle' | 'complete'>('idle')
-  const [cameraActive, setCameraActive] = useState(false)
-  const [responseToken, setResponseToken] = useState('')
+  const [responseCode, setResponseCode] = useState('')
   const [pastedResponse, setPastedResponse] = useState('')
+  const [uploadSummary, setUploadSummary] = useState<SnapshotSummary | null>(null)
+  const [finalSummary, setFinalSummary] = useState<SnapshotSummary | null>(null)
+  const [finalized, setFinalized] = useState(false)
+  const [selectedAuthority, setSelectedAuthority] = useState<SyncAuthority | null>(null)
+  const [pendingOffer, setPendingOffer] = useState('')
+  const [cameraActive, setCameraActive] = useState(false)
+  const [qrError, setQrError] = useState<string | null>(null)
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const dcRef = useRef<RTCDataChannel | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const scannerRef = useRef<QrScanner | null>(null)
-  const isConnectedRef = useRef(false)
   const authorityRef = useRef<SyncAuthority | null>(null)
+  const autoStartedRef = useRef(false)
+  const autoAppliedRef = useRef(false)
 
   useEffect(() => {
     return () => {
@@ -55,6 +78,29 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
     }
   }, [])
 
+  useEffect(() => {
+    if (mode === 'create' && !autoStartedRef.current) {
+      autoStartedRef.current = true
+      void createSession()
+      return
+    }
+
+    if (mode === 'sync') {
+      setStep('qr')
+    }
+  }, [mode])
+
+  useEffect(() => {
+    if (mode !== 'create' || step !== 'code') return
+    if (!pastedResponse.trim() || autoAppliedRef.current) return
+
+    const timer = window.setTimeout(() => {
+      void applyPastedResponse(true)
+    }, 450)
+
+    return () => window.clearTimeout(timer)
+  }, [mode, step, pastedResponse])
+
   async function stopCameraScanner() {
     scannerRef.current?.stop()
     scannerRef.current?.destroy()
@@ -62,126 +108,110 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
     setCameraActive(false)
   }
 
+  async function closeSession() {
+    await stopCameraScanner()
+    try {
+      dcRef.current?.close()
+      pcRef.current?.close()
+    } catch {
+      // ignore cleanup errors
+    }
+    dcRef.current = null
+    pcRef.current = null
+    setStep(mode === 'create' ? 'qr' : 'qr')
+    setQrDataUrl(null)
+    setBusy(false)
+    setSendProgress({ current: 0, total: 0 })
+    setReceiveProgress({ current: 0, total: 0 })
+    setResponseCode('')
+    setPastedResponse('')
+    setPendingOffer('')
+    setUploadSummary(null)
+    setFinalSummary(null)
+    setFinalized(false)
+    setSelectedAuthority(null)
+    setQrError(null)
+    authorityRef.current = null
+    autoAppliedRef.current = false
+  }
+
   function attachChannel(channel: RTCDataChannel) {
     dcRef.current = channel
-    channel.onopen = () => {
-      isConnectedRef.current = true
-      setStage('connected')
-      setStatus('Canal listo')
-      setInstruction('Conexión establecida. Esperando confirmación de la prioridad elegida.')
-      setLogs((prev) => [...prev, 'Canal de datos abierto'])
 
+    channel.onopen = () => {
       const authority = authorityRef.current
+      setStep('progress')
       if (authority) {
         channel.send(JSON.stringify({ type: 'sync/control', id: crypto.randomUUID(), authority }))
-        setLogs((prev) => [...prev, authority === 'a' ? 'Se pidió prioridad de A' : 'Se pidió prioridad de B'])
         if (authority === 'b') {
           void sendCurrentSnapshot('B')
         }
       }
     }
-    channel.onclose = () => {
-      isConnectedRef.current = false
-      setStatus('Desconectado')
-      setLogs((prev) => [...prev, 'Canal cerrado'])
-    }
+
     channel.onmessage = createSyncMessageHandler(
       channel,
       { masterKey },
-      (text) => {
-        setLogs((prev) => [...prev, text])
-        setStatus('Sincronizando')
-      },
+      () => undefined,
       (current, total) => setReceiveProgress({ current, total }),
-      (signature) => {
-        setStatus('Sincronización confirmada')
-        setSyncResult('complete')
-        setLogs((prev) => [...prev, 'La otra ventana confirmó la sincronización'])
-        setLogs((prev) => [...prev, `Firma final: ${signature.slice(0, 8)}…`])
+      () => {
+        setFinalized(true)
+        setStep('progress')
       },
       (authority) => {
         authorityRef.current = authority
+        setStep('progress')
         if (authority === 'a') {
-          setLogs((prev) => [...prev, 'La prioridad final es A'])
           void sendCurrentSnapshot('A')
-        } else {
-          setLogs((prev) => [...prev, 'La prioridad final es B'])
         }
       }
     )
   }
 
-  async function sendCurrentSnapshot(label: 'A' | 'B') {
-    const channel = dcRef.current
-    if (!channel || channel.readyState !== 'open') return
-    setStatus(`Enviando DB de ${label}`)
-    const result = await sendSyncSnapshot(channel, { masterKey }, {
-      onProgress: (current, total) => setSendProgress({ current, total }),
-    })
-    if (result.signature) {
-      setLogs((prev) => [...prev, `Snapshot de ${label} enviado`])
+  async function buildSnapshotSummary(): Promise<SnapshotSummary> {
+    const [notes, images] = await Promise.all([db.notes.toArray(), db.images.count()])
+    return {
+      notes: notes.length,
+      images,
+      titles: notes.slice(0, 5).map((note) => note.title || 'Sin título'),
     }
   }
 
-  async function handleQrPayload(payload: string) {
-    if (!payload) {
-      throw new Error('No se encontró contenido en el QR')
+  async function sendCurrentSnapshot(label: 'A' | 'B') {
+    const channel = dcRef.current
+    if (!channel || channel.readyState !== 'open') return
+
+    const summary = await buildSnapshotSummary()
+    setUploadSummary(summary)
+    setFinalSummary(summary)
+    const result = await sendSyncSnapshot(channel, { masterKey }, {
+      onProgress: (current, total) => setSendProgress({ current, total }),
+    })
+
+    if (result.signature) {
+      setFinalized(true)
     }
 
-    if (stage === 'waiting-for-answer' && pcRef.current) {
-      await setRemoteCompressedAnswer(pcRef.current, payload)
-      setStage('connected')
-      setStatus('Respuesta aceptada')
-      setInstruction('Paso 3 de 3')
-      setFlowStep('progress')
-      setPendingOffer(payload)
-      setLogs((prev) => [...prev, 'Respuesta recibida'])
-      return
-    }
-
-    const pc = new RTCPeerConnection()
-    pcRef.current = pc
-    pc.onconnectionstatechange = () => {
-      setStatus(`Conexión: ${pc.connectionState}`)
-      if (pc.connectionState === 'connected') {
-        setStage('connected')
-        setLogs((prev) => [...prev, 'Conexión establecida'])
-      }
-    }
-
-    pc.ondatachannel = (event) => {
-      attachChannel(event.channel)
-    }
-
-    setStage('responding')
-    setStatus('Oferta recibida')
-    setInstruction('Paso 2 de 3')
-    setFlowStep('code')
-    setPendingOffer(payload)
-    setLogs((prev) => [...prev, 'Oferta recibida. Debes elegir la prioridad.'])
+    setStep('progress')
   }
 
   async function createSession() {
     setBusy(true)
-    setLogs((prev) => [...prev, 'Creando sesión...'])
-    setStatus('Generando QR')
-    setInstruction('Paso 1 de 3')
-    setStage('hosting')
-    setFlowStep('qr')
-    setSyncResult('idle')
-    setChosenAuthority(null)
-    setPendingOffer(null)
-    authorityRef.current = null
-    setQrDataUrl(null)
-    setResponseToken('')
+    setQrError(null)
+    setUploadSummary(null)
+    setFinalSummary(null)
+    setFinalized(false)
+    setSelectedAuthority(null)
+    setPendingOffer('')
+    setResponseCode('')
     setPastedResponse('')
+    setStep('qr')
 
     const pc = new RTCPeerConnection()
+    pc.ondatachannel = (event) => attachChannel(event.channel)
     pc.onconnectionstatechange = () => {
-      setStatus(`Conexión: ${pc.connectionState}`)
       if (pc.connectionState === 'connected') {
-        setStage('connected')
-        setLogs((prev) => [...prev, 'Conexión establecida'])
+        setStep('progress')
       }
     }
 
@@ -195,25 +225,19 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
       const offer = await createOfferAndCompress(pc)
       const url = await QRCode.toDataURL(offer, qrOptions)
       setQrDataUrl(url)
-      setStage('waiting-for-answer')
-      setStatus('Oferta lista')
-      setInstruction('Paso 1 de 3')
-      setLogs((prev) => [...prev, 'QR de oferta listo'])
+      setStep('qr')
     } catch (error) {
       console.error(error)
-      setStage('error')
-      setStatus('Error al crear QR')
-      setLogs((prev) => [...prev, 'No se pudo crear la sesión'])
+      setQrError('No se pudo crear el QR.')
     } finally {
       setBusy(false)
     }
   }
 
-  async function processQrFile(file?: File) {
+  async function loadQrFromFile(file?: File) {
     if (!file) return
     setBusy(true)
-    setLogs((prev) => [...prev, `Leyendo QR: ${file.name}`])
-
+    setQrError(null)
     try {
       const result = await QrScanner.scanImage(file, {
         returnDetailedScanResult: true,
@@ -225,10 +249,7 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
       await handleQrPayload(payload)
     } catch (error) {
       console.error(error)
-      setStage('error')
-      setStatus('No se pudo leer el QR')
-      setInstruction('Paso 2 de 3')
-      setLogs((prev) => [...prev, `Error: ${String(error)}`])
+      setQrError('No se pudo leer el QR.')
     } finally {
       setBusy(false)
       if (fileInputRef.current) {
@@ -237,172 +258,140 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
     }
   }
 
-  async function startCameraScanner() {
+  async function openCameraScanner() {
     if (cameraActive) return
-    const videoElement = videoRef.current
-    if (!videoElement) return
+    const video = videoRef.current
+    if (!video) return
 
     setBusy(true)
-    setLogs((prev) => [...prev, 'Iniciando cámara...'])
-    setStage('scanning')
-    setStatus('Cámara activa')
-    setInstruction('Apunta la cámara al QR que quieras leer.')
+    setQrError(null)
 
     try {
-      const scanner = new QrScanner(
-        videoElement,
-        async (result) => {
-          const payload = typeof result === 'string' ? result : result.data
-          if (!payload) return
-
-          await stopCameraScanner()
-          try {
-            await handleQrPayload(payload)
-          } catch (error) {
-            console.error(error)
-            setStage('error')
-            setStatus('No se pudo procesar el QR')
-            setLogs((prev) => [...prev, `Error: ${String(error)}`])
-          }
-        },
-        {
-          preferredCamera: 'environment',
-          highlightScanRegion: true,
-          highlightCodeOutline: true,
-        }
-      )
+      const scanner = new QrScanner(video, async (result) => {
+        const payload = typeof result === 'string' ? result : result.data
+        if (!payload) return
+        await stopCameraScanner()
+        await handleQrPayload(payload)
+      }, {
+        preferredCamera: 'environment',
+        highlightScanRegion: true,
+        highlightCodeOutline: true,
+      })
 
       scannerRef.current = scanner
       setCameraActive(true)
       await scanner.start()
     } catch (error) {
       console.error(error)
-      setStage('error')
-      setStatus('No se pudo abrir la cámara')
-      setInstruction('Paso 2 de 3')
-      setLogs((prev) => [...prev, `Error cámara: ${String(error)}`])
+      setQrError('No se pudo abrir la cámara.')
       await stopCameraScanner()
     } finally {
       setBusy(false)
     }
   }
 
-  async function toggleCameraScanner() {
-    if (cameraActive) {
-      await stopCameraScanner()
-      setStatus('Cámara detenida')
+  async function handleQrPayload(payload: string) {
+    if (!payload) {
+      throw new Error('No se encontró contenido en el QR')
+    }
+
+    if (mode === 'create') {
+      if (!pcRef.current) return
+      await setRemoteCompressedAnswer(pcRef.current, payload)
+      setStep('progress')
       return
     }
 
-    await startCameraScanner()
-  }
+    const pc = new RTCPeerConnection()
+    pcRef.current = pc
+    pc.ondatachannel = (event) => attachChannel(event.channel)
 
-  function openFilePicker() {
-    fileInputRef.current?.click()
+    setPendingOffer(payload)
+    setSelectedAuthority(null)
+    setResponseCode('')
+    setPastedResponse('')
+    setFinalSummary(null)
+    setUploadSummary(null)
+    setStep('code')
   }
 
   async function chooseAuthority(authority: SyncAuthority) {
-    if (!pendingOffer || !pcRef.current) return
-    authorityRef.current = authority
-    setChosenAuthority(authority)
+    if (!pcRef.current || !pendingOffer) return
     setBusy(true)
-    setLogs((prev) => [...prev, authority === 'a' ? 'Elegiste prioridad de A' : 'Elegiste prioridad de B'])
-    setStatus('Generando respuesta')
+    setQrError(null)
+    setSelectedAuthority(authority)
+    authorityRef.current = authority
 
     try {
       const answer = await setRemoteOfferAndCreateAnswer(pcRef.current, pendingOffer)
-      setResponseToken(answer)
-      setStage('responding')
-      setFlowStep('code')
-      setInstruction(authority === 'a'
-        ? 'La base de A prevalecerá. Copia este texto y pégalo en A para completar la conexión.'
-        : 'La base de B prevalecerá. Copia este texto y pégalo en A para completar la conexión.')
-      setStatus(authority === 'a' ? 'A tendrá prioridad' : 'B tendrá prioridad')
-      setLogs((prev) => [...prev, 'Respuesta generada como texto'])
+      setResponseCode(answer)
+      autoAppliedRef.current = false
+      await navigator.clipboard.writeText(answer).catch(() => undefined)
+      setStep('code')
     } catch (error) {
       console.error(error)
-      setStage('error')
-      setStatus('No se pudo generar la respuesta')
-      setLogs((prev) => [...prev, `Error: ${String(error)}`])
+      setQrError('No se pudo generar el código.')
     } finally {
       setBusy(false)
     }
   }
 
-  function resetSession() {
-    void stopCameraScanner()
+  async function shareOrCopyCode() {
+    if (!responseCode) return
     try {
-      dcRef.current?.close()
-      pcRef.current?.close()
+      await navigator.clipboard.writeText(responseCode)
     } catch {
-      // ignore cleanup errors
+      // ignore clipboard failure
     }
-    dcRef.current = null
-    pcRef.current = null
-    setStage('idle')
-    setQrDataUrl(null)
-    setFlowStep('qr')
-    setStatus('Listo')
-    setInstruction('Paso 1 de 3')
-    setLogs([])
-    setSendProgress({ current: 0, total: 0 })
-    setReceiveProgress({ current: 0, total: 0 })
-    setChosenAuthority(null)
-    setPendingOffer(null)
-    setSyncResult('idle')
-    authorityRef.current = null
-    setResponseToken('')
-    setPastedResponse('')
+
+    if (navigator.share) {
+      await navigator.share({ text: responseCode, title: 'Código de sincronización' }).catch(() => undefined)
+    }
   }
 
-  async function applyPastedResponse() {
-    if (!pastedResponse.trim() || !pcRef.current) return
+  async function applyPastedResponse(auto = false) {
+    if (mode === 'create' && !pastedResponse.trim()) return
+    if (!pcRef.current || !pastedResponse.trim()) return
+
+    autoAppliedRef.current = true
     setBusy(true)
+    setQrError(null)
+
     try {
       await setRemoteCompressedAnswer(pcRef.current, pastedResponse.trim())
-      setStage('connected')
-      setStatus('Respuesta aplicada')
-      setInstruction('Paso 3 de 3')
-      setFlowStep('progress')
-      setLogs((prev) => [...prev, 'Respuesta pegada manualmente'])
+      setStep('progress')
     } catch (error) {
-      console.error(error)
-      setStage('error')
-      setStatus('No se pudo aplicar la respuesta')
-      setLogs((prev) => [...prev, `Error: ${String(error)}`])
+      if (!auto) {
+        console.error(error)
+        setQrError('No se pudo aplicar el código.')
+      }
     } finally {
       setBusy(false)
+    }
+  }
+
+  function confirmNext() {
+    if (step === 'qr') {
+      setStep('code')
+      return
+    }
+
+    if (step === 'code') {
+      void applyPastedResponse()
     }
   }
 
   const sendPercent = sendProgress.total > 0 ? Math.round((sendProgress.current / sendProgress.total) * 100) : 0
   const receivePercent = receiveProgress.total > 0 ? Math.round((receiveProgress.current / receiveProgress.total) * 100) : 0
-
-  const canGoNext = flowStep === 'qr' ? Boolean(qrDataUrl) : flowStep === 'code' ? true : true
-
-  async function goNextFromQr() {
-    setFlowStep('code')
-  }
-
-  async function goNextFromCode() {
-    if (stage === 'waiting-for-answer') {
-      await applyPastedResponse()
-      return
-    }
-
-    if (stage === 'responding' && responseToken) {
-      setFlowStep('progress')
-      return
-    }
-  }
+  const isCreate = mode === 'create'
+  const currentSummary = finalSummary ?? uploadSummary
 
   return (
     <div className="fixed inset-0 z-50 bg-black/50 p-0 sm:p-4 flex items-end sm:items-center justify-center overflow-y-auto">
       <div className="w-full h-[100dvh] sm:h-auto max-w-3xl rounded-none sm:rounded-3xl bg-white shadow-2xl border overflow-hidden max-h-[100dvh] sm:max-h-[92vh] overflow-y-auto">
-        <div className="sticky top-0 z-10 flex items-start justify-between gap-3 px-4 sm:px-5 py-4 border-b bg-gray-50/95 backdrop-blur">
+        <div className="sticky top-0 z-10 flex items-center justify-between gap-3 px-4 sm:px-5 py-4 border-b bg-gray-50/95 backdrop-blur">
           <div>
             <h3 className="text-lg font-semibold text-gray-900">Sincronización</h3>
-            <p className="text-xs text-gray-600 mt-1">{instruction}</p>
           </div>
           <button className="rounded-full border px-3 py-2 text-sm shrink-0 bg-white" onClick={onClose}>
             Cerrar
@@ -410,206 +399,252 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
         </div>
 
         <div className="p-4 sm:p-5 space-y-4">
-          <div className="flex items-center gap-2 text-xs font-medium text-gray-500">
-            <span className={`rounded-full px-2 py-1 ${flowStep === 'qr' ? 'bg-gray-900 text-white' : 'bg-gray-100'}`}>1. QR</span>
-            <span className={`rounded-full px-2 py-1 ${flowStep === 'code' ? 'bg-gray-900 text-white' : 'bg-gray-100'}`}>2. Código</span>
-            <span className={`rounded-full px-2 py-1 ${flowStep === 'progress' ? 'bg-gray-900 text-white' : 'bg-gray-100'}`}>3. Progreso</span>
+          <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-gray-500">
+            {stepLabels.map((item, index) => {
+              const active = step === item.id
+              const done = stepLabels.findIndex((entry) => entry.id === step) > index
+              return (
+                <React.Fragment key={item.id}>
+                  <span className={`rounded-full px-3 py-1 ${active ? 'bg-gray-900 text-white' : done ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-600'}`}>
+                    {item.label}
+                  </span>
+                  {index < stepLabels.length - 1 && <span className="text-gray-300">›</span>}
+                </React.Fragment>
+              )
+            })}
           </div>
 
-          <div className="grid gap-4">
-            <div className="rounded-2xl border bg-gray-50 p-4 space-y-4">
-              {flowStep === 'qr' && (
-                <div className="space-y-4">
-                  <button
-                    className="w-full rounded-xl bg-blue-600 text-white font-medium px-4 py-3 disabled:opacity-50"
-                    onClick={createSession}
-                    disabled={busy || stage !== 'idle'}
-                  >
-                    {stage === 'idle' ? 'Crear sincronización' : 'Generando QR...'}
-                  </button>
+          {qrError && (
+            <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+              {qrError}
+            </div>
+          )}
 
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={(event) => processQrFile(event.target.files?.[0])}
-                  />
+          <div className="rounded-2xl border bg-gray-50 p-4 space-y-4">
+            {step === 'qr' && isCreate && (
+              <div className="space-y-4">
+                <button
+                  className="w-full rounded-xl bg-blue-600 text-white font-medium px-4 py-3 disabled:opacity-50"
+                  onClick={createSession}
+                  disabled={busy || !!qrDataUrl}
+                >
+                  Generar QR
+                </button>
 
-                  <div className="flex gap-2">
-                    <button className="flex-1 rounded-xl border bg-white px-3 py-3 text-sm font-medium disabled:opacity-50" onClick={openFilePicker} disabled={busy}>
-                      Escanear QR
-                    </button>
-                    <button className="flex-1 rounded-xl border bg-white px-3 py-3 text-sm font-medium disabled:opacity-50" onClick={toggleCameraScanner} disabled={busy}>
-                      Cámara
-                    </button>
-                  </div>
-
-                  {qrDataUrl ? (
+                {qrDataUrl ? (
+                  <div className="space-y-3">
                     <div className="mx-auto w-full max-w-[20rem] rounded-2xl border bg-white p-2">
                       <img src={qrDataUrl} alt="QR de sincronización" className="w-full h-auto rounded-xl bg-white" />
                     </div>
-                  ) : (
-                    <div className="rounded-2xl border-dashed border-2 border-gray-200 p-8 text-center text-gray-500 min-h-48 flex items-center justify-center bg-white">
-                      El QR aparecerá aquí.
+                    <div className="flex gap-2">
+                      <a
+                        className="flex-1 text-center rounded-xl border bg-white px-3 py-3 text-sm font-medium"
+                        href={qrDataUrl}
+                        download="sync-qr.png"
+                      >
+                        Descargar
+                      </a>
+                      <button className="flex-1 rounded-xl bg-gray-900 px-3 py-3 text-sm font-medium text-white" onClick={confirmNext}>
+                        Siguiente
+                      </button>
                     </div>
-                  )}
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border-dashed border-2 border-gray-200 p-8 text-center text-gray-500 min-h-48 flex items-center justify-center bg-white">
+                    El QR aparecerá aquí.
+                  </div>
+                )}
+              </div>
+            )}
 
-                  <button
-                    className="w-full rounded-xl bg-gray-900 text-white font-medium px-4 py-3 disabled:opacity-50"
-                    onClick={goNextFromQr}
-                    disabled={!canGoNext}
-                  >
-                    Siguiente
+            {step === 'qr' && !isCreate && (
+              <div className="space-y-4">
+                <div
+                  className="rounded-2xl border-2 border-dashed bg-white p-4 text-center min-h-48 flex flex-col items-center justify-center gap-3"
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={async (event) => {
+                    event.preventDefault()
+                    const file = event.dataTransfer.files?.[0]
+                    if (file) {
+                      await loadQrFromFile(file)
+                    }
+                  }}
+                >
+                  <p className="text-sm font-medium text-gray-900">Arrastra una imagen del QR aquí</p>
+                  <p className="text-xs text-gray-600">O toca para abrir cámara o archivos.</p>
+                  <button className="rounded-xl bg-gray-900 px-4 py-3 text-sm font-medium text-white" onClick={() => fileInputRef.current?.click()} disabled={busy}>
+                    Buscar archivo
+                  </button>
+                  <button className="rounded-xl border px-4 py-3 text-sm font-medium bg-white" onClick={openCameraScanner} disabled={busy}>
+                    Abrir cámara
                   </button>
                 </div>
-              )}
 
-              {flowStep === 'code' && (
-                <div className="space-y-4">
-                  {stage === 'responding' && !responseToken && pendingOffer && (
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <button
-                        className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-left min-h-24"
-                        onClick={() => chooseAuthority('a')}
-                        disabled={busy}
-                      >
-                        <div className="font-semibold text-blue-900">Prioridad A</div>
-                        <div className="text-sm text-blue-900/80">A manda su base.</div>
-                      </button>
-                      <button
-                        className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-left min-h-24"
-                        onClick={() => chooseAuthority('b')}
-                        disabled={busy}
-                      >
-                        <div className="font-semibold text-emerald-900">Prioridad B</div>
-                        <div className="text-sm text-emerald-900/80">B conserva su base.</div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  className="hidden"
+                  onChange={(event) => loadQrFromFile(event.target.files?.[0])}
+                />
+
+                {cameraActive && (
+                  <div className="rounded-2xl border bg-white p-3 space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-medium text-gray-900">Cámara</p>
+                      <button className="text-sm px-3 py-2 rounded border shrink-0 bg-white" onClick={stopCameraScanner}>
+                        Cerrar
                       </button>
                     </div>
-                  )}
+                    <video ref={videoRef} className="w-full rounded-xl border bg-black aspect-video object-cover max-h-[45svh]" muted playsInline />
+                  </div>
+                )}
+              </div>
+            )}
 
-                  {stage === 'responding' && responseToken && (
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="text-sm font-medium text-gray-900">Código para A</p>
-                        <button
-                          className="rounded-lg border px-3 py-2 text-sm bg-white"
-                          onClick={async () => {
-                            await navigator.clipboard.writeText(responseToken)
-                          }}
-                        >
-                          Copiar
-                        </button>
-                      </div>
-                      <textarea className="w-full min-h-32 rounded-2xl border bg-white p-3 font-mono text-[11px] break-all" readOnly value={responseToken} />
-                    </div>
-                  )}
-
-                  {stage === 'waiting-for-answer' && (
-                    <div className="space-y-3">
-                      <p className="text-sm font-medium text-gray-900">Pega el código de B</p>
+            {step === 'code' && (
+              <div className="space-y-4">
+                {isCreate ? (
+                  <div className="space-y-3">
+                    <div className="rounded-2xl border bg-white p-4">
+                      <p className="text-sm font-medium text-gray-900 mb-2">Pega el código de respuesta</p>
                       <textarea
-                        className="w-full min-h-32 rounded-2xl border bg-white p-3 font-mono text-[11px] break-all"
-                        placeholder="Pega aquí el código"
+                        className="w-full min-h-32 rounded-2xl border bg-gray-50 p-3 font-mono text-[11px] break-all"
+                        placeholder="Pega aquí el código que te envió B"
                         value={pastedResponse}
-                        onChange={(event) => setPastedResponse(event.target.value)}
+                        onChange={(event) => {
+                          setPastedResponse(event.target.value)
+                          autoAppliedRef.current = false
+                        }}
                       />
-                      <div className="flex gap-2">
-                        <button
-                          className="flex-1 rounded-xl border bg-white px-3 py-3 text-sm font-medium"
-                          onClick={async () => setPastedResponse(await navigator.clipboard.readText())}
-                        >
-                          Pegar
+                      <div className="mt-3 flex gap-2">
+                        <button className="flex-1 rounded-xl border bg-white px-3 py-3 text-sm font-medium" onClick={confirmNext} disabled={busy || !pastedResponse.trim()}>
+                          Siguiente
                         </button>
                       </div>
                     </div>
-                  )}
+                    <div className="text-xs text-gray-500">Al pegar el código, avanzará solo.</div>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {!selectedAuthority && (
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <button
+                          className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-4 text-left min-h-24"
+                          onClick={() => {
+                            setSelectedAuthority('a')
+                            void chooseAuthority('a')
+                          }}
+                          disabled={busy}
+                        >
+                          <div className="font-semibold text-blue-900">Bajar datos del otro dispositivo</div>
+                          <div className="text-sm text-blue-900/80">A prevalece y este dispositivo recibe.</div>
+                        </button>
+                        <button
+                          className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-left min-h-24"
+                          onClick={() => {
+                            setSelectedAuthority('b')
+                            void chooseAuthority('b')
+                          }}
+                          disabled={busy}
+                        >
+                          <div className="font-semibold text-emerald-900">Subir datos de este dispositivo</div>
+                          <div className="text-sm text-emerald-900/80">Este equipo manda su base.</div>
+                        </button>
+                      </div>
+                    )}
 
-                  {stage === 'connected' && (
-                    <div className="rounded-2xl border bg-white p-4 text-sm text-gray-700">
-                      Sincronización lista.
+                    {responseCode && (
+                      <div className="rounded-2xl border bg-white p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-sm font-medium text-gray-900">Código para copiar</p>
+                          <div className="flex gap-2">
+                            <button className="rounded-lg border px-3 py-2 text-sm bg-white" onClick={shareOrCopyCode}>
+                              Copiar / compartir
+                            </button>
+                          </div>
+                        </div>
+                        <textarea className="w-full min-h-32 rounded-2xl border bg-gray-50 p-3 font-mono text-[11px] break-all" readOnly value={responseCode} />
+                      </div>
+                    )}
+
+                    {responseCode && (
+                      <p className="text-xs text-gray-500">El código se copió al portapapeles y puedes compartirlo desde aquí.</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {step === 'progress' && (
+              <div className="space-y-4">
+                <div className="rounded-2xl border bg-white p-4 space-y-3">
+                  <div>
+                    <div className="flex justify-between mb-1 text-sm">
+                      <span className="font-medium">Enviando</span>
+                      <span>{sendPercent}%</span>
                     </div>
-                  )}
-
-                  <div className="flex gap-2">
-                    <button
-                      className="flex-1 rounded-xl border bg-white px-4 py-3 text-sm font-medium"
-                      onClick={() => setFlowStep('qr')}
-                    >
-                      Atrás
-                    </button>
-                    <button
-                      className="flex-1 rounded-xl bg-gray-900 px-4 py-3 text-sm font-medium text-white disabled:opacity-50"
-                      onClick={goNextFromCode}
-                      disabled={busy || (stage === 'waiting-for-answer' && !pastedResponse.trim()) || (stage === 'responding' && !responseToken && !chosenAuthority)}
-                    >
-                      Siguiente
-                    </button>
+                    <div className="h-2 rounded-full bg-gray-200 overflow-hidden">
+                      <div className="h-full bg-blue-600" style={{ width: `${sendPercent}%` }} />
+                    </div>
+                  </div>
+                  <div>
+                    <div className="flex justify-between mb-1 text-sm">
+                      <span className="font-medium">Recibiendo</span>
+                      <span>{receivePercent}%</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-gray-200 overflow-hidden">
+                      <div className="h-full bg-emerald-600" style={{ width: `${receivePercent}%` }} />
+                    </div>
                   </div>
                 </div>
-              )}
 
-              {flowStep === 'progress' && (
-                <div className="space-y-4">
-                  <div className="rounded-2xl border bg-white p-4 space-y-3">
-                    <div>
-                      <div className="flex justify-between mb-1 text-sm">
-                        <span className="font-medium">Enviando</span>
-                        <span>{sendPercent}%</span>
-                      </div>
-                      <div className="h-2 rounded-full bg-gray-200 overflow-hidden">
-                        <div className="h-full bg-blue-600" style={{ width: `${sendPercent}%` }} />
-                      </div>
-                    </div>
-                    <div>
-                      <div className="flex justify-between mb-1 text-sm">
-                        <span className="font-medium">Recibiendo</span>
-                        <span>{receivePercent}%</span>
-                      </div>
-                      <div className="h-2 rounded-full bg-gray-200 overflow-hidden">
-                        <div className="h-full bg-emerald-600" style={{ width: `${receivePercent}%` }} />
-                      </div>
-                    </div>
-                  </div>
-
-                  {syncResult === 'complete' ? (
-                    <div className="rounded-2xl border bg-emerald-50 p-4 text-emerald-900 font-medium">
-                      Sincronización terminada.
+                <div className="rounded-2xl border bg-white p-4 space-y-3">
+                  <p className="text-sm font-medium text-gray-900">Cambios subidos</p>
+                  {currentSummary ? (
+                    <div className="space-y-2 text-sm text-gray-700">
+                      <p>{currentSummary.notes} nota{currentSummary.notes === 1 ? '' : 's'} y {currentSummary.images} imagen{currentSummary.images === 1 ? '' : 'es'}.</p>
+                      {currentSummary.titles.length > 0 && (
+                        <div className="flex flex-wrap gap-2">
+                          {currentSummary.titles.map((title) => (
+                            <span key={title} className="rounded-full bg-gray-100 px-3 py-1 text-xs text-gray-700">
+                              {title}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   ) : (
-                    <div className="rounded-2xl border bg-white p-4 text-sm text-gray-700">
-                      Esperando el avance de la sincronización.
-                    </div>
+                    <p className="text-sm text-gray-500">Esperando el resumen de sincronización.</p>
                   )}
-
-                  <button
-                    className="w-full rounded-xl border bg-white px-4 py-3 text-sm font-medium"
-                    onClick={resetSession}
-                  >
-                    Reiniciar
-                  </button>
                 </div>
-              )}
 
-              {cameraActive && (
-                <div className="rounded-2xl border bg-white p-3 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-sm font-medium text-gray-900">Cámara</p>
-                    <button className="text-sm px-3 py-2 rounded border shrink-0" onClick={stopCameraScanner}>
-                      Cerrar
-                    </button>
+                {finalized && (
+                  <div className="rounded-2xl border bg-emerald-50 p-4 text-emerald-900 font-medium">
+                    Sincronización terminada.
                   </div>
-                  <video ref={videoRef} className="w-full rounded-xl border bg-black aspect-video object-cover max-h-[45svh]" muted playsInline />
-                </div>
+                )}
+
+                <button className="w-full rounded-xl border bg-white px-4 py-3 text-sm font-medium" onClick={closeSession}>
+                  Cerrar
+                </button>
+              </div>
+            )}
+          </div>
+
+          {step !== 'progress' && mode === 'create' && (
+            <div className="flex gap-2">
+              <button className="flex-1 rounded-xl border bg-white px-4 py-3 text-sm font-medium" onClick={onClose}>
+                Cerrar
+              </button>
+              {step !== 'qr' && (
+                <button className="flex-1 rounded-xl bg-gray-900 px-4 py-3 text-sm font-medium text-white disabled:opacity-50" onClick={confirmNext} disabled={busy}>
+                  Siguiente
+                </button>
               )}
             </div>
-
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 text-xs text-gray-600">
-              <div className="rounded-xl border bg-white px-3 py-2">Estado: {status}</div>
-              <div className="rounded-xl border bg-white px-3 py-2">Paso: {flowStep}</div>
-              <div className="rounded-xl border bg-white px-3 py-2 col-span-2 sm:col-span-1">Conexión: {stage}</div>
-            </div>
-          </div>
+          )}
         </div>
       </div>
     </div>
