@@ -3,7 +3,6 @@ import { deriveKeyFromPassword, base64ToUint8, uint8ToBase64 } from './core/cryp
 import { getMeta, setMeta } from './core/db'
 import NotesView from './components/NotesView'
 import SyncView from './components/SyncView'
-import { useStorageQuota } from './hooks/useStorageQuota'
 import SettingsModal from './components/SettingsModal'
 
 export default function App() {
@@ -12,7 +11,6 @@ export default function App() {
   const [syncOpen, setSyncOpen] = useState(false)
   const [syncMode, setSyncMode] = useState<'create' | 'sync'>('create')
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const quota = useStorageQuota()
 
   async function handleUnlock(password: string) {
     const stored = await getMeta<string>('salt')
@@ -54,11 +52,7 @@ export default function App() {
         </div>
       </header>
       <NotesView masterKey={masterKey} salt={salt} />
-      <div className="fixed bottom-3 left-3 right-3 sm:left-auto sm:right-4 sm:bottom-4 bg-white border rounded-2xl shadow-lg px-4 py-3 text-sm text-gray-700 max-w-none sm:max-w-xs">
-        <div className="font-medium text-gray-900">Almacenamiento</div>
-        <div>{formatBytes(quota.usage)} usados de {formatBytes(quota.quota)}</div>
-        <div>{Math.round(quota.usageRatio * 100)}% en uso</div>
-      </div>
+      {/* Storage info moved into Configuración modal */}
       {settingsOpen && masterKey && salt && (
         <SettingsModal
           open={settingsOpen}

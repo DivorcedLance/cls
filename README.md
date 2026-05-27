@@ -26,6 +26,11 @@ Notas:
 - La implementación actual es un scaffold funcional con cifrado en cliente (PBKDF2 + AES-GCM) y almacenamiento en IndexedDB (Dexie).
 - Faltan mejoras: streaming export/import, UI de sincronización WebRTC/QR, manejo avanzado de imágenes y backups chunked.
 
+Notas recientes:
+- La información de uso de almacenamiento se muestra ahora dentro de la sección `Configuración` en la app.
+- Al finalizar una sincronización, el receptor muestra un resumen local con el número de notas e imágenes aplicadas cuando es posible.
+- Para más detalles arquitectónicos y snippets de código, ver `ARCHITECTURE.md`.
+
 Despliegue en GitHub Pages:
 
 1. En GitHub, activa Pages usando la fuente "GitHub Actions".

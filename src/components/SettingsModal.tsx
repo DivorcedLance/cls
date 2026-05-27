@@ -1,4 +1,5 @@
 import React, { useRef, useState } from 'react'
+import { useStorageQuota } from '../hooks/useStorageQuota'
 import { createEncryptedBackup, restoreEncryptedBackup } from '../core/backup'
 import { deriveKeyFromPassword } from '../core/crypto'
 import { clearAllData } from '../core/db'
@@ -216,7 +217,35 @@ export default function SettingsModal({ open, masterKey, salt, onClose, onOpenSy
         </div>
 
         {message && <div className="px-4 sm:px-5 pb-5 text-sm text-gray-700">{message}</div>}
+
+        {/* Storage usage at bottom of Settings */}
+        <div className="px-4 sm:px-5 pb-6">
+          <StorageInfo />
+        </div>
       </div>
+    </div>
+  )
+}
+
+function formatBytes(value: number) {
+  if (!value) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let index = 0
+  let size = value
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024
+    index += 1
+  }
+  return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[index]}`
+}
+
+function StorageInfo() {
+  const quota = useStorageQuota()
+  return (
+    <div className="rounded-2xl border bg-white p-3 text-sm">
+      <div className="font-medium text-gray-900">Almacenamiento</div>
+      <div className="text-gray-700">{formatBytes(quota.usage)} usados de {formatBytes(quota.quota)}</div>
+      <div className="text-gray-600">{Math.round(quota.usageRatio * 100)}% en uso</div>
     </div>
   )
 }
