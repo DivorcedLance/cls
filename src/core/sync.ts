@@ -144,6 +144,7 @@ export function createSyncMessageHandler(
   onProgress?: (received: number, total: number) => void,
   onConfirmed?: (signature: string) => void,
   onControl?: (authority: 'a' | 'b') => void,
+  onApplied?: () => void | Promise<void>,
 ) {
   const assemblies = new Map<string, SnapshotAssembly>()
 
@@ -166,6 +167,7 @@ export function createSyncMessageHandler(
       onLog('Snapshot recibido en un solo mensaje')
       onProgress?.(1, 1)
       await applySyncPayloadWithOptions(message.payload, context, { replaceExisting: true })
+      await onApplied?.()
       if (message.signature) {
         channel.send(JSON.stringify({ type: 'sync/ack', id: message.id, signature: message.signature, received: 1 }))
       }
@@ -193,6 +195,7 @@ export function createSyncMessageHandler(
         const payload = assembly.chunks.join('')
         onLog('Snapshot reconstruido, aplicando cambios...')
         await applySyncPayloadWithOptions(payload, context, { replaceExisting: true })
+        await onApplied?.()
         if (message.signature) {
           channel.send(JSON.stringify({ type: 'sync/ack', id: message.id, signature: message.signature, received: assembly.total }))
         }
@@ -208,6 +211,7 @@ export function createSyncMessageHandler(
         const payload = assembly.chunks.join('')
         onLog('Snapshot completo recibido, aplicando cambios...')
         await applySyncPayloadWithOptions(payload, context, { replaceExisting: true })
+        await onApplied?.()
         if (message.signature) {
           channel.send(JSON.stringify({ type: 'sync/ack', id: message.id, signature: message.signature, received: assembly.total }))
         }

@@ -164,6 +164,10 @@ export default function SyncView({
         if (authority === 'a') {
           void sendCurrentSnapshot('A')
         }
+      },
+      async () => {
+        const summary = await buildSnapshotSummary()
+        setFinalSummary(summary)
       }
     )
   }
@@ -601,7 +605,7 @@ export default function SyncView({
                 </div>
 
                 <div className="rounded-2xl border bg-white p-4 space-y-3">
-                  <p className="text-sm font-medium text-gray-900">Cambios subidos</p>
+                  <p className="text-sm font-medium text-gray-900">{mode === 'sync' && !uploadSummary ? 'Sincronizado en este dispositivo' : 'Cambios subidos'}</p>
                   {currentSummary ? (
                     <div className="space-y-2 text-sm text-gray-700">
                       <p>{currentSummary.notes} nota{currentSummary.notes === 1 ? '' : 's'} y {currentSummary.images} imagen{currentSummary.images === 1 ? '' : 'es'}.</p>
@@ -616,7 +620,7 @@ export default function SyncView({
                       )}
                     </div>
                   ) : (
-                    <p className="text-sm text-gray-500">Esperando el resumen de sincronización.</p>
+                    <p className="text-sm text-gray-500">Cambios sincronizados.</p>
                   )}
                 </div>
 
