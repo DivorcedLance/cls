@@ -1,9 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react'
 import QRCode from 'qrcode'
+import QrScanner from 'qr-scanner'
 import { createOfferAndCompress, setRemoteOfferAndCreateAnswer, setRemoteCompressedAnswer } from '../core/p2p'
+import { clearConnection, getConnection, saveConnection } from '../core/connectionStore'
 import { createSyncMessageHandler, sendSyncSnapshot } from '../core/sync'
 
-type SyncStage = 'idle' | 'hosting' | 'waiting-for-answer' | 'responding' | 'connected' | 'error'
+QrScanner.WORKER_PATH = new URL('qr-scanner/qr-scanner-worker.min.js', import.meta.url).toString()
+
+type SyncStage = 'idle' | 'hosting' | 'waiting-for-answer' | 'scanning' | 'responding' | 'connected' | 'error'
 type SyncAuthority = 'a' | 'b'
 
 const qrOptions = {
@@ -28,14 +32,43 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
   const [chosenAuthority, setChosenAuthority] = useState<SyncAuthority | null>(null)
   const [pendingOffer, setPendingOffer] = useState<string | null>(null)
   const [syncResult, setSyncResult] = useState<'idle' | 'complete'>('idle')
+  const [cameraActive, setCameraActive] = useState(false)
+  const [keepConnection, setKeepConnection] = useState(true)
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const dcRef = useRef<RTCDataChannel | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const scannerRef = useRef<QrScanner | null>(null)
   const isConnectedRef = useRef(false)
   const authorityRef = useRef<SyncAuthority | null>(null)
+  const keepConnectionRef = useRef(true)
+
+  useEffect(() => {
+    keepConnectionRef.current = keepConnection
+  }, [keepConnection])
+
+  useEffect(() => {
+    const saved = getConnection()
+    if (!saved) return
+
+    pcRef.current = saved.pc
+    dcRef.current = saved.dc
+    setStage(saved.dc.readyState === 'open' ? 'connected' : 'hosting')
+    setStatus(saved.dc.readyState === 'open' ? 'Conexión guardada' : 'Reanudando conexión')
+    setInstruction('La conexión quedó guardada en esta pestaña. Puedes cerrar y volver a abrir la ventana sin escanear otra vez mientras siga abierta.')
+    attachChannel(saved.dc)
+    setLogs((prev) => [...prev, 'Conexión restaurada desde memoria'])
+  }, [])
 
   useEffect(() => {
     return () => {
+      scannerRef.current?.destroy()
+      if (keepConnectionRef.current && pcRef.current && dcRef.current && dcRef.current.readyState === 'open') {
+        saveConnection({ pc: pcRef.current, dc: dcRef.current })
+        return
+      }
+
+      clearConnection()
       try {
         dcRef.current?.close()
         pcRef.current?.close()
@@ -44,6 +77,49 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
       }
     }
   }, [])
+
+  async function stopCameraScanner() {
+    scannerRef.current?.stop()
+    scannerRef.current?.destroy()
+    scannerRef.current = null
+    setCameraActive(false)
+  }
+
+  async function handleQrPayload(payload: string) {
+    if (!payload) {
+      throw new Error('No se encontró contenido en el QR')
+    }
+
+    if (stage === 'waiting-for-answer' && pcRef.current) {
+      await setRemoteCompressedAnswer(pcRef.current, payload)
+      setStage('connected')
+      setStatus('Respuesta aceptada')
+      setInstruction('Conexión lista. A ya puede leer la respuesta con la cámara en lugar de pasar imágenes.')
+      setPendingOffer(payload)
+      setLogs((prev) => [...prev, 'Respuesta leída. Esperando decisión de prioridad.'])
+      return
+    }
+
+    const pc = new RTCPeerConnection()
+    pcRef.current = pc
+    pc.onconnectionstatechange = () => {
+      setStatus(`Conexión: ${pc.connectionState}`)
+      if (pc.connectionState === 'connected') {
+        setStage('connected')
+        setLogs((prev) => [...prev, 'Conexión establecida'])
+      }
+    }
+
+    pc.ondatachannel = (event) => {
+      attachChannel(event.channel)
+    }
+
+    setStage('responding')
+    setStatus('Oferta recibida')
+    setInstruction('Selecciona qué base debe prevalecer en caso de conflicto.')
+    setPendingOffer(payload)
+    setLogs((prev) => [...prev, 'Oferta recibida. Debes elegir la prioridad.'])
+  }
 
   function attachChannel(channel: RTCDataChannel) {
     dcRef.current = channel
@@ -62,11 +138,16 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
           void sendCurrentSnapshot('B')
         }
       }
+
+      if (keepConnectionRef.current && pcRef.current) {
+        saveConnection({ pc: pcRef.current, dc: channel })
+      }
     }
     channel.onclose = () => {
       isConnectedRef.current = false
       setStatus('Desconectado')
       setLogs((prev) => [...prev, 'Canal cerrado'])
+      clearConnection()
     }
     channel.onmessage = createSyncMessageHandler(
       channel,
@@ -156,47 +237,14 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
     setLogs((prev) => [...prev, `Leyendo QR: ${file.name}`])
 
     try {
-      const QrScanner = (await import('qr-scanner')).default
       const result = await QrScanner.scanImage(file, {
         returnDetailedScanResult: true,
         highlightCodeOutline: true,
         alsoTryWithoutInversion: true,
       })
       const payload = typeof result === 'string' ? result : result?.data
-
-      if (!payload) {
-        throw new Error('No se encontró contenido en el QR')
-      }
-
-      if (stage === 'waiting-for-answer' && pcRef.current) {
-        await setRemoteCompressedAnswer(pcRef.current, payload)
-        setStage('connected')
-        setStatus('Respuesta aceptada')
-        setInstruction('Conexión lista. Esperando la prioridad que elija B.')
-        setPendingOffer(payload)
-        setLogs((prev) => [...prev, 'Respuesta leída. Esperando decisión de prioridad.'])
-        return
-      }
-
-      const pc = new RTCPeerConnection()
-      pcRef.current = pc
-      pc.onconnectionstatechange = () => {
-        setStatus(`Conexión: ${pc.connectionState}`)
-        if (pc.connectionState === 'connected') {
-          setStage('connected')
-          setLogs((prev) => [...prev, 'Conexión establecida'])
-        }
-      }
-
-      pc.ondatachannel = (event) => {
-        attachChannel(event.channel)
-      }
-
-      setStage('responding')
-      setStatus('Oferta recibida')
-      setInstruction('Selecciona qué base debe prevalecer en caso de conflicto.')
-      setPendingOffer(payload)
-      setLogs((prev) => [...prev, 'Oferta recibida. Debes elegir la prioridad.'])
+      if (!payload) throw new Error('No se encontró contenido en el QR')
+      await handleQrPayload(payload)
     } catch (error) {
       console.error(error)
       setStage('error')
@@ -209,6 +257,67 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
         fileInputRef.current.value = ''
       }
     }
+  }
+
+  async function startCameraScanner() {
+    if (cameraActive) return
+    const videoElement = videoRef.current
+    if (!videoElement) return
+
+    setBusy(true)
+    setLogs((prev) => [...prev, 'Iniciando cámara...'])
+    setStage('scanning')
+    setStatus('Cámara activa')
+    setInstruction('Apunta la cámara al QR que quieras leer. Así no necesitas pasar imágenes entre dispositivos.')
+
+    try {
+      const scanner = new QrScanner(
+        videoElement,
+        async (result) => {
+          const payload = typeof result === 'string' ? result : result.data
+          if (!payload) return
+
+          await stopCameraScanner()
+          try {
+            await handleQrPayload(payload)
+          } catch (error) {
+            console.error(error)
+            setStage('error')
+            setStatus('No se pudo procesar el QR')
+            setLogs((prev) => [...prev, `Error: ${String(error)}`])
+          }
+        },
+        {
+          preferredCamera: 'environment',
+          highlightScanRegion: true,
+          highlightCodeOutline: true,
+        }
+      )
+
+      scannerRef.current = scanner
+      setCameraActive(true)
+      await scanner.start()
+    } catch (error) {
+      console.error(error)
+      setStage('error')
+      setStatus('No se pudo abrir la cámara')
+      setInstruction('No se pudo abrir la cámara. Revisa permisos o vuelve a intentarlo con HTTPS.')
+      setLogs((prev) => [...prev, `Error cámara: ${String(error)}`])
+      await stopCameraScanner()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function toggleCameraScanner() {
+    if (cameraActive) {
+      await stopCameraScanner()
+      setStatus('Cámara detenida')
+      setInstruction('Pulsa escanear con cámara para volver a leer un QR sin subir archivos.')
+      return
+    }
+
+    await startCameraScanner()
   }
 
   function openFilePicker() {
@@ -229,10 +338,10 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
       setQrDataUrl(answerQr)
       setStage('responding')
       setInstruction(authority === 'a'
-        ? 'La base de A prevalecerá. Muestra este QR a A.'
-        : 'La base de B prevalecerá. Muestra este QR a A para completar la conexión.')
+        ? 'La base de A prevalecerá. A puede leer esta respuesta con la cámara o desde la pantalla de B.'
+        : 'La base de B prevalecerá. A puede leer esta respuesta con la cámara o desde la pantalla de B.')
       setStatus(authority === 'a' ? 'A tendrá prioridad' : 'B tendrá prioridad')
-      setLogs((prev) => [...prev, 'Respuesta QR generada'])
+      setLogs((prev) => [...prev, 'Respuesta generada'])
     } catch (error) {
       console.error(error)
       setStage('error')
@@ -244,6 +353,8 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
   }
 
   function resetSession() {
+    void stopCameraScanner()
+    clearConnection()
     try {
       dcRef.current?.close()
       pcRef.current?.close()
@@ -265,6 +376,13 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
     authorityRef.current = null
   }
 
+  function closeView() {
+    if (keepConnectionRef.current && pcRef.current && dcRef.current && dcRef.current.readyState === 'open') {
+      saveConnection({ pc: pcRef.current, dc: dcRef.current })
+    }
+    onClose?.()
+  }
+
   const sendPercent = sendProgress.total > 0 ? Math.round((sendProgress.current / sendProgress.total) * 100) : 0
   const receivePercent = receiveProgress.total > 0 ? Math.round((receiveProgress.current / receiveProgress.total) * 100) : 0
 
@@ -282,10 +400,18 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
             )}
           </div>
           <div className="flex gap-2">
+            <label className="flex items-center gap-2 px-3 py-2 rounded border text-sm bg-white">
+              <input
+                type="checkbox"
+                checked={keepConnection}
+                onChange={(event) => setKeepConnection(event.target.checked)}
+              />
+              Guardar conexión
+            </label>
             <button className="px-3 py-2 rounded border" onClick={resetSession} disabled={busy}>
               Reiniciar
             </button>
-            <button className="px-3 py-2 rounded border" onClick={onClose}>
+            <button className="px-3 py-2 rounded border" onClick={closeView}>
               Cerrar
             </button>
           </div>
@@ -305,6 +431,9 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
                 <button className="px-4 py-3 rounded-lg bg-emerald-600 text-white font-medium disabled:opacity-50" onClick={openFilePicker} disabled={busy}>
                   Escanear QR
                 </button>
+                <button className="px-4 py-3 rounded-lg bg-slate-900 text-white font-medium disabled:opacity-50" onClick={toggleCameraScanner} disabled={busy}>
+                  {cameraActive ? 'Detener cámara' : 'Escanear con cámara'}
+                </button>
               </div>
 
               <input
@@ -318,9 +447,10 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
               <div className="text-sm text-gray-700 space-y-2">
                 <p><span className="font-semibold">Estado:</span> {status}</p>
                 <p><span className="font-semibold">1.</span> En A pulsa <span className="font-semibold">Crear sincronización</span>.</p>
-                <p><span className="font-semibold">2.</span> En B pulsa <span className="font-semibold">Escanear QR</span> y elige la imagen.</p>
+                <p><span className="font-semibold">2.</span> En B escanea el QR de A con la cámara o con una imagen.</p>
                 <p><span className="font-semibold">3.</span> En B elige <span className="font-semibold">Prioridad de A</span> o <span className="font-semibold">Prioridad de B</span>.</p>
-                <p><span className="font-semibold">4.</span> El lado con prioridad envía su base completa y la otra se reemplaza.</p>
+                <p><span className="font-semibold">4.</span> A puede leer la respuesta final con cámara, sin pasar archivos.</p>
+                <p><span className="font-semibold">5.</span> El lado con prioridad envía su base completa y la otra se reemplaza.</p>
               </div>
 
               <div className="mt-4 space-y-3 text-sm">
@@ -365,6 +495,21 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
                       <div className="text-sm text-emerald-900/80">Esta ventana conserva lo propio y empuja su DB hacia A.</div>
                     </button>
                   </div>
+                </div>
+              )}
+
+              {cameraActive && (
+                <div className="mt-5 rounded-2xl border bg-white p-4 shadow-sm space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-medium text-gray-900">Cámara de lectura</p>
+                    <button className="text-sm px-3 py-2 rounded border" onClick={stopCameraScanner}>
+                      Cerrar cámara
+                    </button>
+                  </div>
+                  <video ref={videoRef} className="w-full rounded-xl border bg-black aspect-video object-cover" muted playsInline />
+                  <p className="text-sm text-gray-600">
+                    Si B muestra el QR de respuesta en su pantalla, A puede leerlo aquí directamente.
+                  </p>
                 </div>
               )}
             </div>
