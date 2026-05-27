@@ -34,6 +34,9 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
   const [syncResult, setSyncResult] = useState<'idle' | 'complete'>('idle')
   const [cameraActive, setCameraActive] = useState(false)
   const [keepConnection, setKeepConnection] = useState(true)
+  const [hasSavedConnection, setHasSavedConnection] = useState(false)
+  const [responseToken, setResponseToken] = useState('')
+  const [pastedResponse, setPastedResponse] = useState('')
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const dcRef = useRef<RTCDataChannel | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -51,6 +54,8 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
     const saved = getConnection()
     if (!saved) return
 
+    setHasSavedConnection(true)
+
     pcRef.current = saved.pc
     dcRef.current = saved.dc
     setStage(saved.dc.readyState === 'open' ? 'connected' : 'hosting')
@@ -65,10 +70,12 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
       scannerRef.current?.destroy()
       if (keepConnectionRef.current && pcRef.current && dcRef.current && dcRef.current.readyState === 'open') {
         saveConnection({ pc: pcRef.current, dc: dcRef.current })
+        setHasSavedConnection(true)
         return
       }
 
       clearConnection()
+      setHasSavedConnection(false)
       try {
         dcRef.current?.close()
         pcRef.current?.close()
@@ -94,7 +101,7 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
       await setRemoteCompressedAnswer(pcRef.current, payload)
       setStage('connected')
       setStatus('Respuesta aceptada')
-      setInstruction('Conexión lista. A ya puede leer la respuesta con la cámara en lugar de pasar imágenes.')
+      setInstruction('Conexión lista. Pega aquí la respuesta que B te entregue como texto.')
       setPendingOffer(payload)
       setLogs((prev) => [...prev, 'Respuesta leída. Esperando decisión de prioridad.'])
       return
@@ -141,6 +148,7 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
 
       if (keepConnectionRef.current && pcRef.current) {
         saveConnection({ pc: pcRef.current, dc: channel })
+        setHasSavedConnection(true)
       }
     }
     channel.onclose = () => {
@@ -148,6 +156,7 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
       setStatus('Desconectado')
       setLogs((prev) => [...prev, 'Canal cerrado'])
       clearConnection()
+      setHasSavedConnection(false)
     }
     channel.onmessage = createSyncMessageHandler(
       channel,
@@ -334,14 +343,14 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
 
     try {
       const answer = await setRemoteOfferAndCreateAnswer(pcRef.current, pendingOffer)
-      const answerQr = await QRCode.toDataURL(answer, qrOptions)
-      setQrDataUrl(answerQr)
+      setResponseToken(answer)
+      setQrDataUrl(null)
       setStage('responding')
       setInstruction(authority === 'a'
-        ? 'La base de A prevalecerá. A puede leer esta respuesta con la cámara o desde la pantalla de B.'
-        : 'La base de B prevalecerá. A puede leer esta respuesta con la cámara o desde la pantalla de B.')
+        ? 'La base de A prevalecerá. Copia este texto y pégalo en A para completar la conexión.'
+        : 'La base de B prevalecerá. Copia este texto y pégalo en A para completar la conexión.')
       setStatus(authority === 'a' ? 'A tendrá prioridad' : 'B tendrá prioridad')
-      setLogs((prev) => [...prev, 'Respuesta generada'])
+      setLogs((prev) => [...prev, 'Respuesta generada como texto'])
     } catch (error) {
       console.error(error)
       setStage('error')
@@ -379,8 +388,46 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
   function closeView() {
     if (keepConnectionRef.current && pcRef.current && dcRef.current && dcRef.current.readyState === 'open') {
       saveConnection({ pc: pcRef.current, dc: dcRef.current })
+      setHasSavedConnection(true)
     }
     onClose?.()
+  }
+
+  async function reconnectSavedConnection() {
+    const saved = getConnection()
+    if (!saved) {
+      setStatus('No hay conexión guardada')
+      setInstruction('Primero activa Guardar conexión y cierra la vista sin reiniciar.')
+      return
+    }
+
+    pcRef.current = saved.pc
+    dcRef.current = saved.dc
+    attachChannel(saved.dc)
+    setStage(saved.dc.readyState === 'open' ? 'connected' : 'hosting')
+    setStatus(saved.dc.readyState === 'open' ? 'Conexión reanudada' : 'Reanudando conexión')
+    setInstruction('La sesión guardada volvió a vincularse en esta ventana.')
+    setHasSavedConnection(true)
+    setLogs((prev) => [...prev, 'Sesión guardada reanudada manualmente'])
+  }
+
+  async function applyPastedResponse() {
+    if (!pastedResponse.trim() || !pcRef.current) return
+    setBusy(true)
+    try {
+      await setRemoteCompressedAnswer(pcRef.current, pastedResponse.trim())
+      setStage('connected')
+      setStatus('Respuesta aplicada')
+      setInstruction('Conexión lista. Ya no hace falta cámara para la respuesta.')
+      setLogs((prev) => [...prev, 'Respuesta pegada manualmente'])
+    } catch (error) {
+      console.error(error)
+      setStage('error')
+      setStatus('No se pudo aplicar la respuesta')
+      setLogs((prev) => [...prev, `Error: ${String(error)}`])
+    } finally {
+      setBusy(false)
+    }
   }
 
   const sendPercent = sendProgress.total > 0 ? Math.round((sendProgress.current / sendProgress.total) * 100) : 0
@@ -408,6 +455,9 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
               />
               Guardar conexión
             </label>
+            <button className="px-3 py-2 rounded border" onClick={reconnectSavedConnection} disabled={busy || !hasSavedConnection}>
+              Reconectar guardada
+            </button>
             <button className="px-3 py-2 rounded border" onClick={resetSession} disabled={busy}>
               Reiniciar
             </button>
@@ -449,7 +499,7 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
                 <p><span className="font-semibold">1.</span> En A pulsa <span className="font-semibold">Crear sincronización</span>.</p>
                 <p><span className="font-semibold">2.</span> En B escanea el QR de A con la cámara o con una imagen.</p>
                 <p><span className="font-semibold">3.</span> En B elige <span className="font-semibold">Prioridad de A</span> o <span className="font-semibold">Prioridad de B</span>.</p>
-                <p><span className="font-semibold">4.</span> A puede leer la respuesta final con cámara, sin pasar archivos.</p>
+                <p><span className="font-semibold">4.</span> B copia el texto de respuesta y A lo pega aquí.</p>
                 <p><span className="font-semibold">5.</span> El lado con prioridad envía su base completa y la otra se reemplaza.</p>
               </div>
 
@@ -495,6 +545,64 @@ export default function SyncView({ masterKey, onClose }: { masterKey: CryptoKey;
                       <div className="text-sm text-emerald-900/80">Esta ventana conserva lo propio y empuja su DB hacia A.</div>
                     </button>
                   </div>
+                </div>
+              )}
+
+              {stage === 'responding' && responseToken && (
+                <div className="mt-5 rounded-2xl border bg-white p-4 shadow-sm space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-medium text-gray-900">Respuesta para A</p>
+                    <button
+                      className="text-sm px-3 py-2 rounded border"
+                      onClick={async () => {
+                        await navigator.clipboard.writeText(responseToken)
+                        setLogs((prev) => [...prev, 'Respuesta copiada al portapapeles'])
+                      }}
+                    >
+                      Copiar
+                    </button>
+                  </div>
+                  <textarea
+                    className="w-full min-h-36 rounded-xl border p-3 font-mono text-xs bg-gray-50"
+                    readOnly
+                    value={responseToken}
+                  />
+                  <p className="text-sm text-gray-600">
+                    En A pega este texto abajo para terminar la conexión. No necesitas mandar una imagen.
+                  </p>
+                </div>
+              )}
+
+              {stage === 'waiting-for-answer' && (
+                <div className="mt-5 rounded-2xl border bg-white p-4 shadow-sm space-y-3">
+                  <p className="text-sm font-medium text-gray-900">Pegar respuesta de B</p>
+                  <textarea
+                    className="w-full min-h-36 rounded-xl border p-3 font-mono text-xs bg-gray-50"
+                    placeholder="Pega aquí el texto de respuesta que te mandó B"
+                    value={pastedResponse}
+                    onChange={(event) => setPastedResponse(event.target.value)}
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      className="px-4 py-2 rounded-lg bg-indigo-600 text-white font-medium disabled:opacity-50"
+                      onClick={applyPastedResponse}
+                      disabled={busy || !pastedResponse.trim()}
+                    >
+                      Aplicar respuesta
+                    </button>
+                    <button
+                      className="px-4 py-2 rounded-lg border font-medium"
+                      onClick={async () => {
+                        const clipboard = await navigator.clipboard.readText()
+                        setPastedResponse(clipboard)
+                      }}
+                    >
+                      Pegar desde portapapeles
+                    </button>
+                  </div>
+                  <p className="text-sm text-gray-600">
+                    Si quieres, también puedes seguir usando cámara o imagen, pero ya no es obligatorio.
+                  </p>
                 </div>
               )}
 
